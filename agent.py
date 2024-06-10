@@ -138,7 +138,7 @@ def train(agent, env, episodes=1000, batch_size=32, render_freq=10):
     env.close()
 
 
-
+# set up environment
 env = tetris.make('TetrisA-v3')
 env = JoypadSpace(env, MOVEMENT)
 input_shape = (84, 84, 1)  # Shape after preprocessing
