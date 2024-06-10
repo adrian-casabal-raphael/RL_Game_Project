@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense
+from tensorflow.keras.layers import Dense, Conv2D, Flatten
 from tensorflow.keras.optimizers import Adam
 from collections import deque
 import random
@@ -10,9 +10,16 @@ import cv2
 from gym_tetris.actions import MOVEMENT
 from nes_py.wrappers import JoypadSpace
 
-
+print("TensorFlow version:", tf.__version__)
+print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
+gpus = tf.config.experimental.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(e)
 def preprocess_state(state):
-    print(f"original state shape: {state.shape}")
     if len(state.shape) == 3 and state.shape[2] == 3:
         gray = cv2.cvtColor(state, cv2.COLOR_BGR2GRAY) # converts to grayscale
     else:
@@ -21,18 +28,18 @@ def preprocess_state(state):
     normalized = resized / 255.0 # normalize pixel values
     # add extra dimension for compatibility with NN
     preprocessed_state = np.expand_dims(normalized, axis=-1)
-    print(f"Preprocessed state shape: {preprocessed_state.shape}")
     return preprocessed_state
 
 # define architecture of neural network
 def build_model(input_shape, action_size):
-    model = Sequential()
-    model.add(tf.keras.layers.Conv2D(32, (8,8), strides=(4,4), activation='relu', input_shape=input_shape))
-    model.add(tf.keras.layers.Conv2D(64, (4,4), strides=(2,2), activation='relu'))
-    model.add(tf.keras.layers.Conv2D(64, (3,3), activation='relu'))
-    model.add(tf.keras.layers.Flatten())
-    model.add(Dense(512, activation='relu'))
-    model.add(Dense(action_size, activation='softmax')) # change activation to 'linear'
+    model = Sequential([
+        Conv2D(32, (8, 8), strides=(4,4), activation='relu', input_shape=input_shape),
+        Conv2D(64, (4, 4), strides=(2, 2), activation='relu'),
+        Conv2D(64, (3, 3), activation='relu'),
+        Flatten(),
+        Dense(512, activation='relu'),
+        Dense(action_size, activation='linear')
+    ])
     model.compile(loss='mse', optimizer=Adam(learning_rate=0.001))
     return model
 
@@ -63,14 +70,18 @@ class DQNAgent:
 
     def replay(self, batch_size):
         minibatch = random.sample(self.memory, batch_size)
-        for state, action, reward, next_state, done in minibatch:
-            target = self.model.predict(state)
-            if done:
-                target[0][action] = reward
-            else:
-                t = self.target_model.predict(next_state)[0]
-                target[0][action] = reward + self.gamma * np.amax(t)
-            self.model.fit(state, target, epochs=1, verbose=0) # subject to change
+        states = np.vstack([m[0] for m in minibatch])
+        actions = np.array([m[1] for m in minibatch])
+        rewards = np.array([m[2] for m in minibatch])
+        next_states = np.vstack([m[3] for m in minibatch])
+        dones = np.array([m[4] for m in minibatch])
+
+        targets = self.model.predict(states)
+        next_q_values = self.target_model.predict(next_states)
+
+        targets[range(batch_size), actions] = rewards + (1 - dones) * self.gamma * np.amax(next_q_values, axis=1)
+        self.model.fit(states, targets, epochs=1, verbose=0)
+
         if self.epsilon > self.epsilon_min:
             self.epsilon *= self.epsilon_decay
     def load(self, name):
@@ -79,12 +90,17 @@ class DQNAgent:
         self.model.save_weights(name)
 
 # training loop
-def train(agent, env, episodes=10, batch_size=32):
+def train(agent, env, episodes=1000, batch_size=32, render_freq=10):
     for episode in range(episodes):
+        state = env.reset()
+        state = preprocess_state(state)
+        state = np.reshape(state, [1, *agent.input_shape])
         total_reward = 0
         done = True
-        state = None
         for time in range(5000):
+            print(f"in time step: {time}")
+            if time % render_freq == 0:
+                env.render()
             if done:
                 state = env.reset()
                 state = preprocess_state(state)
@@ -93,19 +109,11 @@ def train(agent, env, episodes=10, batch_size=32):
 
             action = agent.choose_action(state, epsilon=agent.epsilon)
             next_state, reward, done, info = env.step(action)
-            env.render()
             next_state = preprocess_state(next_state)
             next_state = np.reshape(next_state, [1, *agent.input_shape])
             # rewards
             lines_cleared = info.get('number_of_lines', 0)
-            if lines_cleared == 1:
-                reward += 10
-            elif lines_cleared == 2:
-                reward += 30
-            elif lines_cleared == 3:
-                reward += 60
-            elif lines_cleared == 4:
-                reward += 100
+            reward += (10 if lines_cleared == 1 else 30 if lines_cleared == 2 else 60 if lines_cleared == 3 else 100 if lines_cleared == 4 else 0)
 
             # penalty for high stacking
             if np.any(state[:, 0:20]):
