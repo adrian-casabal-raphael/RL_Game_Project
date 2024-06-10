@@ -1,0 +1,11 @@
+[33mcommit 71e41f935989bb1bf8cd6a2564242beedeadb229[m[33m ([m[1;36mHEAD[m[33m)[m
+Author: adrian-casabal-raphael <casabalraphael02@gmail.com>
+Date:   Mon Jun 10 16:33:25 2024 -0700
+
+    Completely optimized and working rendering, need to implement recording of agent
+
+[33mcommit d0c0964d20c372b65748caf90ef74c5d42833a71[m[33m ([m[1;31morigin/main[m[33m)[m
+Author: adrian-casabal-raphael <casabalraphael02@gmail.com>
+Date:   Thu Jun 6 16:29:45 2024 -0700
+
+    implemented basic algorithms for training, need to tune hyperparameters still
