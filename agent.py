@@ -9,6 +9,8 @@ import gym_tetris as tetris
 import cv2
 from gym_tetris.actions import MOVEMENT
 from nes_py.wrappers import JoypadSpace
+import os
+import matplotlib.pyplot as plt
 
 print("TensorFlow version:", tf.__version__)
 print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
@@ -43,6 +45,22 @@ def build_model(input_shape, action_size):
     model.compile(loss='mse', optimizer=Adam(learning_rate=0.001))
     return model
 
+# class to normalize rewards
+class RewardNormalizer:
+    def __init__(self):
+        self.mean = 0
+        self.var = 1
+        self.count = 0
+
+    def normalize(self, reward):
+        self.count += 1
+        alpha = 1.0 / self.count
+        self.mean = (1 - alpha) * self.mean + alpha * reward
+        self.var = (1 - alpha) * self.var + alpha * (reward - self.mean) ** 2
+        std = np.sqrt(self.var)
+        normalized_reward = (reward - self.mean) / (std + 1e-8)
+        return normalized_reward
+
 # create DQN agent class
 class DQNAgent:
     def __init__(self, input_shape, action_size):
@@ -56,10 +74,12 @@ class DQNAgent:
         self.model = build_model(input_shape, action_size)
         self.target_model = build_model(input_shape, action_size)
         self.update_target_model()
+        self.reward_normalizer = RewardNormalizer()
     def update_target_model(self):
         self.target_model.set_weights(self.model.get_weights())
     def remember(self, state, action, reward, next_state, done):
-        self.memory.append((state, action, reward, next_state, done))
+        normalized_reward = self.reward_normalizer.normalize(reward)
+        self.memory.append((state, action, normalized_reward, next_state, done))
         if len(self.memory) > 2000:
             self.memory.popleft()
     def choose_action(self, state, epsilon=1.0):
@@ -90,8 +110,19 @@ class DQNAgent:
         self.model.save_weights(name)
 
 # training loop
-def train(agent, env, episodes=1000, batch_size=32, render_freq=10):
+def train(agent, env, episodes=1000, batch_size=32, render_freq=250, record=False, output_dir='recordings'):
+    episode_rewards = []
+    if record and not os.path.exists(output_dir):
+        os.makedirs(output_dir)
     for episode in range(episodes):
+        if record and episode % render_freq == 0:
+            state = env.reset()
+            frame = env.render(mode='rgb_array')
+            height, width, _ = frame.shape
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            video_path = os.path.join(output_dir, f'agent_playing_episode_{episode}.avi')
+            out = cv2.VideoWriter(video_path, fourcc, 20.0, (width,height))
+
         state = env.reset()
         state = preprocess_state(state)
         state = np.reshape(state, [1, *agent.input_shape])
@@ -99,13 +130,18 @@ def train(agent, env, episodes=1000, batch_size=32, render_freq=10):
         done = True
         for time in range(5000):
             print(f"in time step: {time}")
-            if time % render_freq == 0:
-                env.render()
+            if time % render_freq == 0 and episode % render_freq == 0:
+                frame = env.render(mode='rgb_array')
+                if record:
+                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                cv2.imshow('Tetris', frame)
+                cv2.waitKey(1)
             if done:
                 state = env.reset()
                 state = preprocess_state(state)
                 state = np.reshape(state, [1, *agent.input_shape])
                 agent.update_target_model()
+                total_reward -= 100 # significant penalty for resetting game due to stacking
 
             action = agent.choose_action(state, epsilon=agent.epsilon)
             next_state, reward, done, info = env.step(action)
@@ -135,8 +171,17 @@ def train(agent, env, episodes=1000, batch_size=32, render_freq=10):
         if agent.epsilon > agent.epsilon_min:
             agent.epsilon *= agent.epsilon_decay
         print(f"End of episode {episode}, Total Reward: {total_reward}, Epsilon: {agent.epsilon}")
+    if record:
+        out.release()
+    cv2.destroyAllWindows()
     env.close()
 
+    # plotting results
+    plt.plot(episode_rewards)
+    plt.xlabel('Episode')
+    plt.ylabel('Total Reward')
+    plt.title('Training Progress')
+    plt.show()
 
 # set up environment
 env = tetris.make('TetrisA-v3')
@@ -146,4 +191,4 @@ action_size = env.action_space.n
 agent = DQNAgent(input_shape, action_size)
 
 # Train the agent
-train(agent, env)
+train(agent, env, record=True)
