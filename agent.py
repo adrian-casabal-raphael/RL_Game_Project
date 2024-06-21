@@ -7,7 +7,7 @@ from collections import deque
 import random
 import gym_tetris as tetris
 import cv2
-from gym_tetris.actions import SIMPLE_MOVEMENT
+from gym_tetris.actions import MOVEMENT
 from nes_py.wrappers import JoypadSpace
 import os
 import matplotlib.pyplot as plt
@@ -42,7 +42,7 @@ def build_model(input_shape, action_size):
         Dense(512, activation='relu'),
         Dense(action_size, activation='linear')
     ])
-    model.compile(loss='mse', optimizer=Adam(learning_rate=0.001))
+    model.compile(loss='mse', optimizer=Adam(learning_rate=0.00025))
     return model
 
 # class to normalize rewards
@@ -63,12 +63,12 @@ class RewardNormalizer:
 
 # create DQN agent class
 class DQNAgent:
-    def __init__(self, input_shape, action_size):
+    def __init__(self, input_shape, action_size, initial_epsilon=1.0):
         self.input_shape = input_shape
         self.action_size = action_size
-        self.memory = deque(maxlen=10000)
-        self.gamma = 0.9
-        self.epsilon = 1.0
+        self.memory = deque(maxlen=100000)
+        self.gamma = 0.99
+        self.epsilon = initial_epsilon
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
         self.model = build_model(input_shape, action_size)
@@ -80,10 +80,8 @@ class DQNAgent:
     def remember(self, state, action, reward, next_state, done):
         normalized_reward = self.reward_normalizer.normalize(reward)
         self.memory.append((state, action, normalized_reward, next_state, done))
-        if len(self.memory) > 10000:
-            self.memory.popleft()
     def choose_action(self, state, epsilon=1.0):
-        if np.random.rand() <= self.epsilon:
+        if np.random.rand() <= epsilon:
             return random.randrange(self.action_size)
         act_values = self.model.predict(state)
         return np.argmax(act_values[0])
@@ -118,8 +116,10 @@ def get_latest_model(directory):
     latest_model = max(model_files, key=lambda x: os.path.getmtime(os.path.join(directory, x)))
     return os.path.join(directory, latest_model)
 
+
+
 # training loop
-def train(agent, env, episodes=1000, batch_size=32, render_freq=250, record=False, output_dir='recordings', model_dir='models'):
+def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=False, output_dir='recordings', model_dir='models', max_steps=10000):
     episode_rewards = []
     if record and not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -127,6 +127,11 @@ def train(agent, env, episodes=1000, batch_size=32, render_freq=250, record=Fals
         os.makedirs(model_dir)
 
     for episode in range(episodes):
+        if (episode + 1) % 500 == 0:
+            batch_size = min(batch_size * 2, 512)
+        if episode == 1000:
+            max_steps = max_steps * 2
+
         if record and episode % render_freq == 0:
             state = env.reset()
             frame = env.render(mode='rgb_array')
@@ -140,7 +145,7 @@ def train(agent, env, episodes=1000, batch_size=32, render_freq=250, record=Fals
         state = np.reshape(state, [1, *agent.input_shape])
         total_reward = 0
         done = False
-        for time in range(1000):
+        for time in range(max_steps):
             print(f"in time step: {time}")
             if time % 10 == 0 and episode % render_freq == 0:
                 frame = env.render(mode='rgb_array')
@@ -155,18 +160,18 @@ def train(agent, env, episodes=1000, batch_size=32, render_freq=250, record=Fals
             next_state = np.reshape(next_state, [1, *agent.input_shape])
 
             if done:
-                state = env.reset()
-                state = preprocess_state(state)
-                state = np.reshape(state, [1, *agent.input_shape])
                 agent.update_target_model()
                 reward -= 100 # significant penalty for resetting game due to stacking
+                agent.remember(state, action, reward, next_state, done)
+                total_reward += reward
+                break
 
             agent.remember(state, action, reward, next_state, done)
             state = next_state
             total_reward += reward
 
-        if len(agent.memory) > batch_size:
-            agent.replay(batch_size)
+        agent.replay(batch_size)
+
         if agent.epsilon > agent.epsilon_min:
             agent.epsilon *= agent.epsilon_decay
         print(f"End of episode {episode}, Total Reward: {total_reward}, Epsilon: {agent.epsilon}")
@@ -184,26 +189,23 @@ def train(agent, env, episodes=1000, batch_size=32, render_freq=250, record=Fals
     agent.save(os.path.join(model_dir, "final_model.h5"))
 
 
-    # plotting results
-    plt.plot(episode_rewards)
-    plt.xlabel('Episode')
-    plt.ylabel('Total Reward')
-    plt.title('Training Progress')
-    plt.show()
+
 
 # set up environment
 env = tetris.make('TetrisA-v3')
-env = JoypadSpace(env, SIMPLE_MOVEMENT)
+env = JoypadSpace(env, MOVEMENT)
 input_shape = (84, 84, 1)  # Shape after preprocessing
 action_size = env.action_space.n
-agent = DQNAgent(input_shape, action_size)
 
 # load model if available
 model_dir = 'models'
 latest_model_path = get_latest_model(model_dir)
 if latest_model_path:
+    agent = DQNAgent(input_shape, action_size, initial_epsilon=0.1)
     agent.load(latest_model_path)
     print(f"loaded model from {latest_model_path}")
+else:
+    agent = DQNAgent(input_shape, action_size)
 
 # Train the agent
 train(agent, env, record=True)
