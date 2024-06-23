@@ -129,7 +129,7 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
     for episode in range(episodes):
         if (episode + 1) % 500 == 0:
             batch_size = min(batch_size * 2, 512)
-        if episode == 1000:
+        if episode + 1 == 1000:
             max_steps = max_steps * 2
 
         if record and episode % render_freq == 0:
