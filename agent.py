@@ -83,7 +83,7 @@ class DQNAgent:
     def choose_action(self, state, epsilon=1.0):
         if np.random.rand() <= epsilon:
             return random.randrange(self.action_size)
-        act_values = self.model.predict(state)
+        act_values = self.model.predict(state, verbose=0)
         return np.argmax(act_values[0])
 
     def replay(self, batch_size):
@@ -94,8 +94,8 @@ class DQNAgent:
         next_states = np.vstack([m[3] for m in minibatch])
         dones = np.array([m[4] for m in minibatch])
 
-        targets = self.model.predict(states)
-        next_q_values = self.target_model.predict(next_states)
+        targets = self.model.predict(states, verbose=0)
+        next_q_values = self.target_model.predict(next_states, verbose=0)
 
         targets[range(batch_size), actions] = rewards + (1 - dones) * self.gamma * np.amax(next_q_values, axis=1)
         self.model.fit(states, targets, epochs=1, verbose=0)
