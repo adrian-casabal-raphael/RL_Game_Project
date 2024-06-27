@@ -66,11 +66,11 @@ class DQNAgent:
     def __init__(self, input_shape, action_size, initial_epsilon=1.0):
         self.input_shape = input_shape
         self.action_size = action_size
-        self.memory = deque(maxlen=100000)
+        self.memory = deque(maxlen=200000)
         self.gamma = 0.99
         self.epsilon = initial_epsilon
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.995
+        self.epsilon_decay = 0.99
         self.model = build_model(input_shape, action_size)
         self.target_model = build_model(input_shape, action_size)
         self.update_target_model()
@@ -116,7 +116,16 @@ def get_latest_model(directory):
     latest_model = max(model_files, key=lambda x: os.path.getmtime(os.path.join(directory, x)))
     return os.path.join(directory, latest_model)
 
-
+def count_holes(grid):
+    holes = 0
+    for col in range(grid.shape[1]):
+        block_found = False
+        for row in range(grid.shape[0]):
+            if grid[row,col] != 0:
+                block_found = True
+            elif block_found and grid[row,col] == 0:
+                holes += 1;
+    return holes
 
 # training loop
 def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=False, output_dir='recordings', model_dir='models', max_steps=10000):
@@ -146,7 +155,8 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
         total_reward = 0
         done = False
         for time in range(max_steps):
-            print(f"in time step: {time}")
+            if time % 1000 == 0:
+                print(f"in time step: {time}")
             if time % 10 == 0 and episode % render_freq == 0:
                 frame = env.render(mode='rgb_array')
                 if record:
@@ -159,8 +169,17 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
             next_state = preprocess_state(next_state)
             next_state = np.reshape(next_state, [1, *agent.input_shape])
 
+            # penalties for holes
+            grid = env.unwrapped._board
+            holes = count_holes(grid)
+            hole_penalty = -2 * holes
+            reward += hole_penalty
+
+            # extra reward for clearing lines
+            lines_cleared = info.get('number_of_lines', 0)
+            reward += lines_cleared * 10
+
             if done:
-                agent.update_target_model()
                 reward -= 100 # significant penalty for resetting game due to stacking
                 agent.remember(state, action, reward, next_state, done)
                 total_reward += reward
@@ -171,9 +190,9 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
             total_reward += reward
 
         agent.replay(batch_size)
+        if (episode + 1) % 100 == 0:
+            agent.update_target_model()
 
-        if agent.epsilon > agent.epsilon_min:
-            agent.epsilon *= agent.epsilon_decay
         print(f"End of episode {episode}, Total Reward: {total_reward}, Epsilon: {agent.epsilon}")
 
         if episode % 100 == 0:
@@ -201,7 +220,7 @@ action_size = env.action_space.n
 model_dir = 'models'
 latest_model_path = get_latest_model(model_dir)
 if latest_model_path:
-    agent = DQNAgent(input_shape, action_size, initial_epsilon=0.1)
+    agent = DQNAgent(input_shape, action_size, initial_epsilon=0.2)
     agent.load(latest_model_path)
     print(f"loaded model from {latest_model_path}")
 else:
