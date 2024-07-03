@@ -7,10 +7,9 @@ from collections import deque
 import random
 import gym_tetris as tetris
 import cv2
-from gym_tetris.actions import MOVEMENT
+from gym_tetris.actions import SIMPLE_MOVEMENT
 from nes_py.wrappers import JoypadSpace
 import os
-import matplotlib.pyplot as plt
 
 print("TensorFlow version:", tf.__version__)
 print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
@@ -70,11 +69,12 @@ class DQNAgent:
         self.gamma = 0.99
         self.epsilon = initial_epsilon
         self.epsilon_min = 0.01
-        self.epsilon_decay = 0.99
+        self.epsilon_decay = 0.995
         self.model = build_model(input_shape, action_size)
         self.target_model = build_model(input_shape, action_size)
         self.update_target_model()
         self.reward_normalizer = RewardNormalizer()
+        self.visited_states = set()
     def update_target_model(self, tau=0.1):
         model_weights = self.model.get_weights()
         target_weights = self.target_model.get_weights()
@@ -115,8 +115,12 @@ class DQNAgent:
             self.epsilon *= self.epsilon_decay
     def load(self, name):
         self.model.load_weights(name)
+    def load_target(self, name):
+        self.target_model.load_weights(name)
     def save(self, name):
         self.model.save_weights(name)
+    def save_target(self, name):
+        self.target_model.save_weights(name)
 
 def get_latest_model(directory):
     if not os.path.exists(directory):
@@ -138,18 +142,24 @@ def count_holes(grid):
                 holes += 1;
     return holes
 
+# function to store already visited states
+def state_to_hashable(state):
+    return tuple(state.flatten())
+
 # training loop
-def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=False, output_dir='recordings', model_dir='models', max_steps=20000):
+def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=False, output_dir='recordings', model_dir='models', target_dir ='target_models', max_steps=5000):
     episode_rewards = []
     if record and not os.path.exists(output_dir):
         os.makedirs(output_dir)
     if not os.path.exists(model_dir):
         os.makedirs(model_dir)
+    if not os.path.exists(target_dir):
+        os.makedirs(target_dir)
 
     for episode in range(episodes):
         if (episode + 1) % 500 == 0:
             batch_size = min(batch_size * 2, 512)
-        if episode + 1 == 1000:
+        if (episode + 1) % 500 == 0:
             max_steps = max_steps * 2
 
         if record and episode % render_freq == 0:
@@ -162,6 +172,7 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
 
         state = env.reset()
         state = preprocess_state(state)
+        state_hash = state_to_hashable(state)
         state = np.reshape(state, [1, *agent.input_shape])
         total_reward = 0
         done = False
@@ -178,6 +189,7 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
             action = agent.choose_action(state, epsilon=agent.epsilon)
             next_state, reward, done, info = env.step(action)
             next_state = preprocess_state(next_state)
+            next_state_hash = state_to_hashable(next_state)
             next_state = np.reshape(next_state, [1, *agent.input_shape])
 
             # penalties for holes
@@ -186,9 +198,10 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
             hole_penalty = -2 * holes
             reward += hole_penalty
 
-            # extra reward for clearing lines
-            lines_cleared = info.get('number_of_lines', 0)
-            reward += lines_cleared * 10
+            # reward for visiting a unique state
+            if next_state_hash not in agent.visited_states:
+                reward += 5
+                agent.visited_states.add(next_state_hash)
 
             if done:
                 reward -= 100 # significant penalty for resetting game due to stacking
@@ -198,6 +211,7 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
 
             agent.remember(state, action, reward, next_state, done)
             state = next_state
+            state_hash = next_state_hash
             total_reward += reward
 
         agent.replay(batch_size)
@@ -209,6 +223,8 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
         if episode % 50 == 0:
             model_path = os.path.join(model_dir, f"model_checkpoint_{episode}.h5")
             agent.save(model_path)
+            target_model_path = os.path.join(target_dir, f"model_checkpoint_{episode}.h5")
+            agent.save_target(target_model_path)
         if record:
             out.release()
             cv2.destroyAllWindows()
@@ -222,17 +238,20 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
 
 # set up environment
 env = tetris.make('TetrisA-v3')
-env = JoypadSpace(env, MOVEMENT)
+env = JoypadSpace(env, SIMPLE_MOVEMENT)
 input_shape = (84, 84, 1)  # Shape after preprocessing
 action_size = env.action_space.n
 
 # load model if available
 model_dir = 'models'
+target_dir = 'target_models'
 latest_model_path = get_latest_model(model_dir)
-if latest_model_path:
+latest_target_path = get_latest_model(target_dir)
+if latest_model_path and latest_target_path:
     agent = DQNAgent(input_shape, action_size, initial_epsilon=0.1)
     agent.load(latest_model_path)
-    print(f"loaded model from {latest_model_path}")
+    agent.load_target(latest_target_path)
+    print(f"loaded model from {latest_model_path} and {latest_target_path}")
 else:
     agent = DQNAgent(input_shape, action_size)
 
