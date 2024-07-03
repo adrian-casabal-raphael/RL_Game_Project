@@ -107,8 +107,8 @@ class DQNAgent:
             if dones[i]:
                 targets[i][actions[i]] = rewards[i]
             else:
-                max_expected = np.argmax(next_q_values[i])
-                targets[i][actions[i]] = rewards[i] + self.gamma * next_q_values[i][max_expected]
+                max_expected = np.max(next_q_values[i])
+                targets[i][actions[i]] = rewards[i] + self.gamma * max_expected
         self.model.fit(states, targets, epochs=1, verbose=0)
 
         if self.epsilon > self.epsilon_min:
@@ -147,7 +147,7 @@ def state_to_hashable(state):
     return tuple(state.flatten())
 
 # training loop
-def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=False, output_dir='recordings', model_dir='models', target_dir ='target_models', max_steps=5000):
+def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=False, output_dir='recordings', model_dir='models', target_dir ='target_models', max_steps=5000):
     episode_rewards = []
     if record and not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -179,7 +179,7 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
         for time in range(max_steps):
             if time % 1000 == 0:
                 print(f"in time step: {time}")
-            if time % 10 == 0 and episode % render_freq == 0:
+            if episode % render_freq == 0:
                 frame = env.render(mode='rgb_array')
                 if record:
                     out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
