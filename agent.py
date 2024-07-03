@@ -66,7 +66,7 @@ class DQNAgent:
     def __init__(self, input_shape, action_size, initial_epsilon=1.0):
         self.input_shape = input_shape
         self.action_size = action_size
-        self.memory = deque(maxlen=200000)
+        self.memory = deque(maxlen=100000)
         self.gamma = 0.99
         self.epsilon = initial_epsilon
         self.epsilon_min = 0.01
@@ -75,8 +75,14 @@ class DQNAgent:
         self.target_model = build_model(input_shape, action_size)
         self.update_target_model()
         self.reward_normalizer = RewardNormalizer()
-    def update_target_model(self):
-        self.target_model.set_weights(self.model.get_weights())
+    def update_target_model(self, tau=0.1):
+        model_weights = self.model.get_weights()
+        target_weights = self.target_model.get_weights()
+        new_weights = []
+        for model_weight, target_weight in zip(model_weights, target_weights):
+            new_weight = tau * model_weight + (1 - tau) * target_weight
+            new_weights.append(new_weight)
+        self.target_model.set_weights(new_weights)
     def remember(self, state, action, reward, next_state, done):
         normalized_reward = self.reward_normalizer.normalize(reward)
         self.memory.append((state, action, normalized_reward, next_state, done))
@@ -97,7 +103,12 @@ class DQNAgent:
         targets = self.model.predict(states, verbose=0)
         next_q_values = self.target_model.predict(next_states, verbose=0)
 
-        targets[range(batch_size), actions] = rewards + (1 - dones) * self.gamma * np.amax(next_q_values, axis=1)
+        for i in range(batch_size):
+            if dones[i]:
+                targets[i][actions[i]] = rewards[i]
+            else:
+                max_expected = np.argmax(next_q_values[i])
+                targets[i][actions[i]] = rewards[i] + self.gamma * next_q_values[i][max_expected]
         self.model.fit(states, targets, epochs=1, verbose=0)
 
         if self.epsilon > self.epsilon_min:
@@ -128,7 +139,7 @@ def count_holes(grid):
     return holes
 
 # training loop
-def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=False, output_dir='recordings', model_dir='models', max_steps=10000):
+def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=False, output_dir='recordings', model_dir='models', max_steps=20000):
     episode_rewards = []
     if record and not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -195,7 +206,7 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
 
         print(f"End of episode {episode}, Total Reward: {total_reward}, Epsilon: {agent.epsilon}")
 
-        if episode % 100 == 0:
+        if episode % 50 == 0:
             model_path = os.path.join(model_dir, f"model_checkpoint_{episode}.h5")
             agent.save(model_path)
         if record:
@@ -209,7 +220,6 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=250, record=Fal
 
 
 
-
 # set up environment
 env = tetris.make('TetrisA-v3')
 env = JoypadSpace(env, MOVEMENT)
@@ -220,7 +230,7 @@ action_size = env.action_space.n
 model_dir = 'models'
 latest_model_path = get_latest_model(model_dir)
 if latest_model_path:
-    agent = DQNAgent(input_shape, action_size, initial_epsilon=0.2)
+    agent = DQNAgent(input_shape, action_size, initial_epsilon=0.1)
     agent.load(latest_model_path)
     print(f"loaded model from {latest_model_path}")
 else:
