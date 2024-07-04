@@ -111,8 +111,6 @@ class DQNAgent:
                 targets[i][actions[i]] = rewards[i] + self.gamma * max_expected
         self.model.fit(states, targets, epochs=1, verbose=0)
 
-        if self.epsilon > self.epsilon_min:
-            self.epsilon *= self.epsilon_decay
     def load(self, name):
         self.model.load_weights(name)
     def load_target(self, name):
@@ -179,7 +177,7 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
         for time in range(max_steps):
             if time % 1000 == 0:
                 print(f"in time step: {time}")
-            if episode % render_freq == 0:
+            if time % 10 == 0 and episode % render_freq == 0:
                 frame = env.render(mode='rgb_array')
                 if record:
                     out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
@@ -215,6 +213,9 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
             total_reward += reward
 
         agent.replay(batch_size)
+        if (episode + 1) % 10 == 0:
+            if agent.epsilon > agent.epsilon_min:
+                agent.epsilon *= agent.epsilon_decay
         if (episode + 1) % 100 == 0:
             agent.update_target_model()
 
@@ -248,7 +249,7 @@ target_dir = 'target_models'
 latest_model_path = get_latest_model(model_dir)
 latest_target_path = get_latest_model(target_dir)
 if latest_model_path and latest_target_path:
-    agent = DQNAgent(input_shape, action_size, initial_epsilon=0.1)
+    agent = DQNAgent(input_shape, action_size, initial_epsilon=0.5)
     agent.load(latest_model_path)
     agent.load_target(latest_target_path)
     print(f"loaded model from {latest_model_path} and {latest_target_path}")
