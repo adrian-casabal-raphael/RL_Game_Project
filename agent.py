@@ -145,7 +145,7 @@ def state_to_hashable(state):
     return tuple(state.flatten())
 
 # training loop
-def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=False, output_dir='recordings', model_dir='models', target_dir ='target_models', max_steps=5000):
+def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=False, output_dir='recordings', model_dir='models', target_dir ='target_models', max_steps=10000):
     episode_rewards = []
     if record and not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -213,7 +213,7 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
             total_reward += reward
 
         agent.replay(batch_size)
-        if (episode + 1) % 10 == 0:
+        if (episode + 1) % 5 == 0:
             if agent.epsilon > agent.epsilon_min:
                 agent.epsilon *= agent.epsilon_decay
         if (episode + 1) % 100 == 0:
