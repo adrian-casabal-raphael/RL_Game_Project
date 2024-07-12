@@ -254,7 +254,7 @@ target_dir = 'target_models'
 latest_model_path = get_latest_model(model_dir)
 latest_target_path = get_latest_model(target_dir)
 if latest_model_path and latest_target_path:
-    agent = DQNAgent(input_shape, action_size, initial_epsilon=0.5)
+    agent = DQNAgent(input_shape, action_size, initial_epsilon=0.4)
     agent.load(latest_model_path)
     agent.load_target(latest_target_path)
     print(f"loaded model from {latest_model_path} and {latest_target_path}")
