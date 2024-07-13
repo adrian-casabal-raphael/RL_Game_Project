@@ -1,7 +1,7 @@
 import numpy as np
 import tensorflow as tf
 from tensorflow.keras.models import Sequential
-from tensorflow.keras.layers import Dense, Conv2D, Flatten
+from tensorflow.keras.layers import Dense, Conv2D, Flatten, Input, Concatenate
 from tensorflow.keras.optimizers import Adam
 from collections import deque
 import random
@@ -20,29 +20,52 @@ if gpus:
             tf.config.experimental.set_memory_growth(gpu, True)
     except RuntimeError as e:
         print(e)
-def preprocess_state(state):
-    if len(state.shape) == 3 and state.shape[2] == 3:
-        gray = cv2.cvtColor(state, cv2.COLOR_BGR2GRAY) # converts to grayscale
+
+
+def preprocess_state(state, last_states, max_height, holes, lines_cleared):
+    if state.shape[-1] == 3:
+        gray = cv2.cvtColor(state, cv2.COLOR_BGR2GRAY)
     else:
         gray = state
-    resized = cv2.resize(gray, (84, 84)) # resize to fixed state
-    normalized = resized / 255.0 # normalize pixel values
-    # add extra dimension for compatibility with NN
-    preprocessed_state = np.expand_dims(normalized, axis=-1)
-    return preprocessed_state
+
+    resized = cv2.resize(gray, (84, 84)) / 255.0  # Normalize pixel values
+
+    # Create the feature vector
+    features = np.array([max_height / 20.0, holes / 200.0, lines_cleared / 4.0])
+    features = np.expand_dims(features, axis=0)
+
+    # Stack frames for a sense of motion
+    last_states.append(resized)
+    if len(last_states) > 4:  # Use last 4 frames
+        last_states.pop(0)
+
+    # Ensure the stacked states are of the correct shape
+    while len(last_states) < 4:
+        last_states.append(resized)
+
+    stacked_states = np.stack(last_states, axis=-1)
+    stacked_states = np.expand_dims(stacked_states, axis=-1)  # Add channel dimension
+
+    return stacked_states, features
 
 # define architecture of neural network
-def build_model(input_shape, action_size):
-    model = Sequential([
-        Conv2D(32, (8, 8), strides=(4,4), activation='relu', input_shape=input_shape),
-        Conv2D(64, (4, 4), strides=(2, 2), activation='relu'),
-        Conv2D(64, (3, 3), activation='relu'),
-        Flatten(),
-        Dense(512, activation='relu'),
-        Dense(action_size, activation='linear')
-    ])
+def build_model(input_shape, feature_shape, action_size):
+    grid_input = Input(shape=input_shape)
+    feature_input = Input(shape=feature_shape)
+
+    x = Conv2D(32, (8, 8), strides=(4, 4), activation='relu')(grid_input)
+    x = Conv2D(64, (4, 4), strides=(2, 2), activation='relu')(x)
+    x = Conv2D(64, (3, 3), activation='relu')(x)
+    x = Flatten()(x)
+
+    concatenated = Concatenate()([x, feature_input])
+    y = Dense(512, activation='relu')(concatenated)
+    output = Dense(action_size, activation='linear')(y)
+
+    model = tf.keras.Model(inputs=[grid_input, feature_input], outputs=output)
     model.compile(loss='mse', optimizer=Adam(learning_rate=0.00025))
     return model
+
 
 # class to normalize rewards
 class RewardNormalizer:
@@ -62,16 +85,17 @@ class RewardNormalizer:
 
 # create DQN agent class
 class DQNAgent:
-    def __init__(self, input_shape, action_size, initial_epsilon=1.0):
+    def __init__(self, input_shape, feature_shape, action_size, initial_epsilon=1.0):
         self.input_shape = input_shape
         self.action_size = action_size
+        self.feature_shape = feature_shape
         self.memory = deque(maxlen=100000)
         self.gamma = 0.99
         self.epsilon = initial_epsilon
         self.epsilon_min = 0.01
         self.epsilon_decay = 0.995
-        self.model = build_model(input_shape, action_size)
-        self.target_model = build_model(input_shape, action_size)
+        self.model = build_model(input_shape, feature_shape, action_size)
+        self.target_model = build_model(input_shape, feature_shape, action_size)
         self.update_target_model()
         self.reward_normalizer = RewardNormalizer()
         self.visited_states = set()
@@ -83,25 +107,27 @@ class DQNAgent:
             new_weight = tau * model_weight + (1 - tau) * target_weight
             new_weights.append(new_weight)
         self.target_model.set_weights(new_weights)
-    def remember(self, state, action, reward, next_state, done):
+    def remember(self, state, features, action, reward, next_state, next_features, done):
         normalized_reward = self.reward_normalizer.normalize(reward)
-        self.memory.append((state, action, normalized_reward, next_state, done))
-    def choose_action(self, state, epsilon=1.0):
+        self.memory.append((state, features, action, normalized_reward, next_state, next_features, done))
+    def choose_action(self, state, features, epsilon):
         if np.random.rand() <= epsilon:
             return random.randrange(self.action_size)
-        act_values = self.model.predict(state, verbose=0)
+        act_values = self.model.predict([state, features], verbose=0)
         return np.argmax(act_values[0])
 
     def replay(self, batch_size):
         minibatch = random.sample(self.memory, batch_size)
         states = np.vstack([m[0] for m in minibatch])
-        actions = np.array([m[1] for m in minibatch])
-        rewards = np.array([m[2] for m in minibatch])
-        next_states = np.vstack([m[3] for m in minibatch])
-        dones = np.array([m[4] for m in minibatch])
+        features = np.vstack([m[1] for m in minibatch])
+        actions = np.array([m[2] for m in minibatch])
+        rewards = np.array([m[3] for m in minibatch])
+        next_states = np.vstack([m[4] for m in minibatch])
+        next_features = np.vstack([m[5] for m in minibatch])
+        dones = np.array([m[6] for m in minibatch])
 
-        targets = self.model.predict(states, verbose=0)
-        next_q_values = self.target_model.predict(next_states, verbose=0)
+        targets = self.model.predict([states, features], verbose=0)
+        next_q_values = self.target_model.predict([next_states, next_features], verbose=0)
 
         for i in range(batch_size):
             if dones[i]:
@@ -109,7 +135,7 @@ class DQNAgent:
             else:
                 max_expected = np.max(next_q_values[i])
                 targets[i][actions[i]] = rewards[i] + self.gamma * max_expected
-        self.model.fit(states, targets, epochs=1, verbose=0)
+        self.model.fit([states, features], targets, epochs=1, verbose=0)
 
     def load(self, name):
         self.model.load_weights(name)
@@ -154,6 +180,8 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
     if not os.path.exists(target_dir):
         os.makedirs(target_dir)
 
+    last_states = deque(maxlen=4)
+
     for episode in range(episodes):
         if (episode + 1) % 500 == 0:
             batch_size = min(batch_size * 2, 512)
@@ -169,9 +197,10 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
             out = cv2.VideoWriter(video_path, fourcc, 20.0, (width,height))
 
         state = env.reset()
-        state = preprocess_state(state)
+        state, features = preprocess_state(state, last_states, 0,0,0)
         state_hash = state_to_hashable(state)
         state = np.reshape(state, [1, *agent.input_shape])
+        features = np.reshape(features, [1, *agent.feature_shape])
         total_reward = 0
         done = False
         for time in range(max_steps):
@@ -184,20 +213,22 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
                 cv2.imshow('Tetris', frame)
                 cv2.waitKey(1)
 
-            action = agent.choose_action(state, epsilon=agent.epsilon)
+            action = agent.choose_action(state, features, agent.epsilon)
             next_state, reward, done, info = env.step(action)
-            next_state = preprocess_state(next_state)
+            max_height = np.max(np.sum(next_state, axis=1))
+            holes = count_holes(env.unwrapped._board)
+            lines_cleared = info.get('number_of_lines', 0)
+            next_state, next_features = preprocess_state(next_state, last_states, max_height, holes, lines_cleared)
             next_state_hash = state_to_hashable(next_state)
             next_state = np.reshape(next_state, [1, *agent.input_shape])
+            next_features = np.reshape(next_features, [1, *agent.feature_shape])
 
             # penalties for holes
-            grid = env.unwrapped._board
-            holes = count_holes(grid)
             hole_penalty = -2 * holes
             reward += hole_penalty
 
             # extra penalty for high stacking
-            if np.max(grid) > 8:
+            if np.max(env.unwrapped._board) > 8:
                 reward -= 10
 
             # reward for visiting a unique state
@@ -207,13 +238,14 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
 
             if done:
                 reward -= 100 # significant penalty for resetting game due to stacking
-                agent.remember(state, action, reward, next_state, done)
+                agent.remember(state, features, action, reward, next_state, next_features, done)
                 total_reward += reward
                 agent.replay(batch_size)
                 break
 
-            agent.remember(state, action, reward, next_state, done)
+            agent.remember(state, features, action, reward, next_state, next_features, done)
             state = next_state
+            features = next_features
             state_hash = next_state_hash
             total_reward += reward
             if (time + 1) % 500 == 0:
@@ -245,7 +277,8 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
 # set up environment
 env = tetris.make('TetrisA-v3')
 env = JoypadSpace(env, SIMPLE_MOVEMENT)
-input_shape = (84, 84, 1)  # Shape after preprocessing
+input_shape = (84, 84, 4)  # Shape after preprocessing
+feature_shape = (3,)
 action_size = env.action_space.n
 
 # load model if available
@@ -254,12 +287,12 @@ target_dir = 'target_models'
 latest_model_path = get_latest_model(model_dir)
 latest_target_path = get_latest_model(target_dir)
 if latest_model_path and latest_target_path:
-    agent = DQNAgent(input_shape, action_size, initial_epsilon=0.4)
+    agent = DQNAgent(input_shape, feature_shape, action_size, initial_epsilon=0.4)
     agent.load(latest_model_path)
     agent.load_target(latest_target_path)
     print(f"loaded model from {latest_model_path} and {latest_target_path}")
 else:
-    agent = DQNAgent(input_shape, action_size)
+    agent = DQNAgent(input_shape, feature_shape, action_size)
 
 # Train the agent
 train(agent, env, record=True)
