@@ -7,9 +7,10 @@ from collections import deque
 import random
 import gym_tetris as tetris
 import cv2
-from gym_tetris.actions import SIMPLE_MOVEMENT
+from gym_tetris.actions import SIMPLE_MOVEMENT, MOVEMENT
 from nes_py.wrappers import JoypadSpace
 import os
+import hashlib
 
 print("TensorFlow version:", tf.__version__)
 print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
@@ -44,7 +45,7 @@ def preprocess_state(state, last_states, max_height, holes, lines_cleared):
         last_states.append(resized)
 
     stacked_states = np.stack(last_states, axis=-1)
-    stacked_states = np.expand_dims(stacked_states, axis=-1)  # Add channel dimension
+    # stacked_states = np.expand_dims(stacked_states, axis=-1)  # Add channel dimension
 
     return stacked_states, features
 
@@ -168,7 +169,7 @@ def count_holes(grid):
 
 # function to store already visited states
 def state_to_hashable(state):
-    return tuple(state.flatten())
+    return hashlib.sha256(state.tobytes()).hexdigest()
 
 # training loop
 def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=False, output_dir='recordings', model_dir='models', target_dir ='target_models', max_steps=10000):
@@ -276,7 +277,12 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
 
 # set up environment
 env = tetris.make('TetrisA-v3')
-env = JoypadSpace(env, SIMPLE_MOVEMENT)
+'''
+can switch between SIMPLE_MOVEMENT and MOVEMENT,
+but if saved model is on one movement cannot load if switched to different movement.
+MOVEMENT IS DEFAULT 
+'''
+env = JoypadSpace(env, MOVEMENT)
 input_shape = (84, 84, 4)  # Shape after preprocessing
 feature_shape = (3,)
 action_size = env.action_space.n
@@ -287,7 +293,7 @@ target_dir = 'target_models'
 latest_model_path = get_latest_model(model_dir)
 latest_target_path = get_latest_model(target_dir)
 if latest_model_path and latest_target_path:
-    agent = DQNAgent(input_shape, feature_shape, action_size, initial_epsilon=0.4)
+    agent = DQNAgent(input_shape, feature_shape, action_size, initial_epsilon=1.0)
     agent.load(latest_model_path)
     agent.load_target(latest_target_path)
     print(f"loaded model from {latest_model_path} and {latest_target_path}")
