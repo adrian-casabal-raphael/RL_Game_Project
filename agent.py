@@ -5,12 +5,11 @@ from tensorflow.keras.layers import Dense, Conv2D, Flatten, Input, Concatenate
 from tensorflow.keras.optimizers import Adam
 from collections import deque
 import random
-import gym_tetris as tetris
 import cv2
-from gym_tetris.actions import SIMPLE_MOVEMENT, MOVEMENT
-from nes_py.wrappers import JoypadSpace
 import os
 import hashlib
+from src.tetris import Tetris
+import torch as torch
 
 print("TensorFlow version:", tf.__version__)
 print("Num GPUs Available: ", len(tf.config.experimental.list_physical_devices('GPU')))
@@ -23,31 +22,16 @@ if gpus:
         print(e)
 
 
-def preprocess_state(state, last_states, max_height, holes, lines_cleared):
-    if state.shape[-1] == 3:
-        gray = cv2.cvtColor(state, cv2.COLOR_BGR2GRAY)
-    else:
-        gray = state
+def preprocess_state(state):
+    if isinstance(state, torch.Tensor):
+        state = state.numpy()
 
-    resized = cv2.resize(gray, (84, 84)) / 255.0  # Normalize pixel values
+    if state.dtype != np.uint8:
+        state = state.astype(np.uint8)
 
-    # Create the feature vector
-    features = np.array([max_height / 20.0, holes / 200.0, lines_cleared / 4.0])
-    features = np.expand_dims(features, axis=0)
+    resized = cv2.resize(state, (84, 84)) / 255.0  # Normalize pixel values
+    return np.expand_dims(resized, axis=-1)  # Add channel dimension
 
-    # Stack frames for a sense of motion
-    last_states.append(resized)
-    if len(last_states) > 4:  # Use last 4 frames
-        last_states.pop(0)
-
-    # Ensure the stacked states are of the correct shape
-    while len(last_states) < 4:
-        last_states.append(resized)
-
-    stacked_states = np.stack(last_states, axis=-1)
-    # stacked_states = np.expand_dims(stacked_states, axis=-1)  # Add channel dimension
-
-    return stacked_states, features
 
 # define architecture of neural network
 def build_model(input_shape, feature_shape, action_size):
@@ -84,9 +68,18 @@ class RewardNormalizer:
         normalized_reward = (reward - self.mean) / (std + 1e-8)
         return normalized_reward
 
+def get_action_space(env):
+    action_space = []
+    for x in range(env.width):
+        for rotations in range(4):  # Assuming up to 4 possible rotations
+            action_space.append((x, rotations))
+    return action_space
+
+
 # create DQN agent class
 class DQNAgent:
-    def __init__(self, input_shape, feature_shape, action_size, initial_epsilon=1.0):
+    def __init__(self, env, input_shape, feature_shape, action_size, initial_epsilon=1.0):
+        self.env = env
         self.input_shape = input_shape
         self.action_size = action_size
         self.feature_shape = feature_shape
@@ -100,6 +93,7 @@ class DQNAgent:
         self.update_target_model()
         self.reward_normalizer = RewardNormalizer()
         self.visited_states = set()
+        self.action_space = get_action_space(self.env)
     def update_target_model(self, tau=0.1):
         model_weights = self.model.get_weights()
         target_weights = self.target_model.get_weights()
@@ -113,11 +107,25 @@ class DQNAgent:
         self.memory.append((state, features, action, normalized_reward, next_state, next_features, done))
     def choose_action(self, state, features, epsilon):
         if np.random.rand() <= epsilon:
-            return random.randrange(self.action_size)
+            return random.choice(self.action_space)
         act_values = self.model.predict([state, features], verbose=0)
-        return np.argmax(act_values[0])
+        action_index = np.argmax(act_values[0])
+        action = self.action_space[action_index]
+
+        # Validate action
+        x, num_rotations = action
+        valid_x = x >= 0 and x < self.env.width
+        valid_rotations = num_rotations >= 0 and num_rotations < 4
+
+        if not (valid_x and valid_rotations):
+            return random.choice(self.action_space)
+
+        return action
 
     def replay(self, batch_size):
+        if len(self.memory) < batch_size:
+            batch_size = len(self.memory)
+
         minibatch = random.sample(self.memory, batch_size)
         states = np.vstack([m[0] for m in minibatch])
         features = np.vstack([m[1] for m in minibatch])
@@ -172,7 +180,7 @@ def state_to_hashable(state):
     return hashlib.sha256(state.tobytes()).hexdigest()
 
 # training loop
-def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=False, output_dir='recordings', model_dir='models', target_dir ='target_models', max_steps=10000):
+def train(agent, env, episodes=1501, batch_size=64, render_freq=100, record=False, output_dir='recordings', model_dir='models', target_dir ='target_models', max_steps=5000):
     episode_rewards = []
     if record and not os.path.exists(output_dir):
         os.makedirs(output_dir)
@@ -180,8 +188,6 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
         os.makedirs(model_dir)
     if not os.path.exists(target_dir):
         os.makedirs(target_dir)
-
-    last_states = deque(maxlen=4)
 
     for episode in range(episodes):
         if (episode + 1) % 500 == 0:
@@ -191,66 +197,63 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
 
         if record and episode % render_freq == 0:
             state = env.reset()
-            frame = env.render(mode='rgb_array')
+            frame = env.render()
             height, width, _ = frame.shape
             fourcc = cv2.VideoWriter_fourcc(*'XVID')
             video_path = os.path.join(output_dir, f'agent_playing_episode_{episode}.avi')
             out = cv2.VideoWriter(video_path, fourcc, 20.0, (width,height))
 
         state = env.reset()
-        state, features = preprocess_state(state, last_states, 0,0,0)
-        state_hash = state_to_hashable(state)
-        state = np.reshape(state, [1, *agent.input_shape])
-        features = np.reshape(features, [1, *agent.feature_shape])
+        state_img = env.get_current_board_state()
+        state_img = preprocess_state(state_img)
+        state_img = np.reshape(state_img, [1, *agent.input_shape])
+
+        state_features = env.get_state_properties(env.board)
+        if isinstance(state_features, torch.Tensor):
+            state_features = state_features.numpy()
+        state_features = np.reshape(state_features, [1, *agent.feature_shape])
+        state_hash = state_to_hashable(state_img)
+
         total_reward = 0
         done = False
         for time in range(max_steps):
             if time % 1000 == 0:
                 print(f"in time step: {time}")
             if time % 10 == 0 and episode % render_freq == 0:
-                frame = env.render(mode='rgb_array')
-                if record:
-                    out.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+                frame = env.render()
+                if record and (frame is not None):
+                    out.write(frame)
                 cv2.imshow('Tetris', frame)
                 cv2.waitKey(1)
 
-            action = agent.choose_action(state, features, agent.epsilon)
-            next_state, reward, done, info = env.step(action)
-            max_height = np.max(np.sum(next_state, axis=1))
-            holes = count_holes(env.unwrapped._board)
-            lines_cleared = info.get('number_of_lines', 0)
-            next_state, next_features = preprocess_state(next_state, last_states, max_height, holes, lines_cleared)
-            next_state_hash = state_to_hashable(next_state)
-            next_state = np.reshape(next_state, [1, *agent.input_shape])
-            next_features = np.reshape(next_features, [1, *agent.feature_shape])
+            action = agent.choose_action(state_img, state_features, agent.epsilon)
+            reward, done = env.step(action)
+            next_state_img = env.get_current_board_state()
+            next_state_img = preprocess_state(next_state_img)
+            next_state_img = np.reshape(next_state_img, [1, *agent.input_shape])
 
-            # penalties for holes
-            hole_penalty = -2 * holes
-            reward += hole_penalty
-
-            # extra penalty for high stacking
-            if np.max(env.unwrapped._board) > 8:
-                reward -= 10
-
-            # reward for visiting a unique state
-            if next_state_hash not in agent.visited_states:
-                reward += 5
-                agent.visited_states.add(next_state_hash)
+            next_state_features = env.get_state_properties(env.board)
+            if isinstance(next_state_features, torch.Tensor):
+                next_state_features = next_state_features.numpy()
+            next_state_features = np.reshape(next_state_features, [1, *agent.feature_shape])
+            next_state_hash = state_to_hashable(next_state_img)
 
             if done:
-                reward -= 100 # significant penalty for resetting game due to stacking
-                agent.remember(state, features, action, reward, next_state, next_features, done)
+                reward -= 100  # significant penalty for resetting game due to stacking
+                agent.remember(state_img, state_features, action, reward, next_state_img, next_state_features, done)
                 total_reward += reward
                 agent.replay(batch_size)
                 break
 
-            agent.remember(state, features, action, reward, next_state, next_features, done)
-            state = next_state
-            features = next_features
+            agent.remember(state_img, state_features, action, reward, next_state_img, next_state_features, done)
+            state_img = next_state_img
+            state_features = next_state_features
             state_hash = next_state_hash
             total_reward += reward
+
             if (time + 1) % 500 == 0:
                 agent.replay(batch_size)
+
         if (episode + 1) % 10 == 0:
             if agent.epsilon > agent.epsilon_min:
                 agent.epsilon *= agent.epsilon_decay
@@ -268,24 +271,18 @@ def train(agent, env, episodes=1501, batch_size=128, render_freq=100, record=Fal
             out.release()
             cv2.destroyAllWindows()
 
-    env.close()
 
     # save the final model
     agent.save(os.path.join(model_dir, "final_model.h5"))
+    agent.save_target(os.path.join(target_dir, "final_model.h5"))
 
 
 
 # set up environment
-env = tetris.make('TetrisA-v3')
-'''
-can switch between SIMPLE_MOVEMENT and MOVEMENT,
-but if saved model is on one movement cannot load if switched to different movement.
-MOVEMENT IS DEFAULT 
-'''
-env = JoypadSpace(env, MOVEMENT)
-input_shape = (84, 84, 4)  # Shape after preprocessing
-feature_shape = (3,)
-action_size = env.action_space.n
+env = Tetris()
+input_shape = (84, 84, 1)  # Shape after preprocessing
+feature_shape = (4,)
+action_size = len(get_action_space(env))
 
 # load model if available
 model_dir = 'models'
@@ -293,12 +290,12 @@ target_dir = 'target_models'
 latest_model_path = get_latest_model(model_dir)
 latest_target_path = get_latest_model(target_dir)
 if latest_model_path and latest_target_path:
-    agent = DQNAgent(input_shape, feature_shape, action_size, initial_epsilon=1.0)
+    agent = DQNAgent(env, input_shape, feature_shape, action_size, initial_epsilon=0.4)
     agent.load(latest_model_path)
     agent.load_target(latest_target_path)
     print(f"loaded model from {latest_model_path} and {latest_target_path}")
 else:
-    agent = DQNAgent(input_shape, feature_shape, action_size)
+    agent = DQNAgent(env, input_shape, feature_shape, action_size)
 
 # Train the agent
 train(agent, env, record=True)
