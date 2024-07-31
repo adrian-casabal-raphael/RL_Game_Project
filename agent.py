@@ -8,14 +8,10 @@ import cv2
 from collections import deque
 from PIL import Image
 from src.tetris import Tetris
-import logging
-import time
 
 # Ensure directories exist
 os.makedirs("recordings", exist_ok=True)
 os.makedirs("models", exist_ok=True)
-
-logging.basicConfig(level=logging.DEBUG)
 
 print("PyTorch version:", torch.__version__)
 print("CUDA available:", torch.cuda.is_available())
@@ -26,6 +22,8 @@ if torch.cuda.is_available():
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+
+# Define the neural network for the Q-learning
 class DuelingDQN(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(DuelingDQN, self).__init__()
@@ -50,6 +48,8 @@ class DuelingDQN(nn.Module):
         value = self.value(features)
         return value + (advantages - advantages.mean())
 
+
+# Replay buffer to store experiences with prioritization
 class PrioritizedReplayBuffer:
     def __init__(self, capacity, alpha=0.6):
         self.buffer = deque(maxlen=capacity)
@@ -87,6 +87,8 @@ class PrioritizedReplayBuffer:
     def __len__(self):
         return len(self.buffer)
 
+
+# Training the DQN
 def train(env, model, target_model, optimizer, replay_buffer, batch_size, gamma, beta):
     if len(replay_buffer) < batch_size:
         return
@@ -118,10 +120,16 @@ def train(env, model, target_model, optimizer, replay_buffer, batch_size, gamma,
 
     replay_buffer.update_priorities(indices, prios.data.cpu().numpy())
 
-def save_model(model, episode):
-    model_path = f"models/tetris_model_{episode + 1}.pth"
-    torch.save(model.state_dict(), model_path)
 
+# Save the model
+def save_model(model, episode):
+    tmp_model_path = f"models/tetris_model_{episode + 1}.pth.tmp"
+    model_path = f"models/tetris_model_{episode + 1}.pth"
+    torch.save(model.state_dict(), tmp_model_path)
+    os.rename(tmp_model_path, model_path)
+
+
+# Load the model and return a flag indicating success
 def load_model(model, episode):
     model_path = f"models/tetris_model_{episode}.pth"
     if os.path.exists(model_path):
@@ -133,115 +141,121 @@ def load_model(model, episode):
         print(f"No model found at {model_path}")
         return False
 
+
+# Main function to train the DQN agent
 def main():
-    env = Tetris()
-    possible_actions = list(env.get_next_states().keys())
-    action_to_index = {action: idx for idx, action in enumerate(possible_actions)}
-    index_to_action = {idx: action for idx, action in enumerate(possible_actions)}
+    try:
+        env = Tetris()
+        possible_actions = list(env.get_next_states().keys())
+        action_to_index = {action: idx for idx, action in enumerate(possible_actions)}
+        index_to_action = {idx: action for idx, action in enumerate(possible_actions)}
 
-    model = DuelingDQN(input_dim=4, output_dim=len(possible_actions)).to(device)
-    target_model = DuelingDQN(input_dim=4, output_dim=len(possible_actions)).to(device)
-    target_model.load_state_dict(model.state_dict())
-    optimizer = optim.Adam(model.parameters())
-    replay_buffer = PrioritizedReplayBuffer(100000)
-    num_episodes = 20000
-    batch_size = 512
-    gamma = 0.99
-    beta = 0.4
-    beta_increment_per_sampling = 0.001
+        model = DuelingDQN(input_dim=4, output_dim=len(possible_actions)).to(device)
+        target_model = DuelingDQN(input_dim=4, output_dim=len(possible_actions)).to(device)
+        target_model.load_state_dict(model.state_dict())
+        optimizer = optim.Adam(model.parameters())
+        replay_buffer = PrioritizedReplayBuffer(100000)
+        num_episodes = 40000
+        batch_size = 512
+        gamma = 0.99
+        beta = 0.4
+        beta_increment_per_sampling = 0.001
 
-    model_loaded = load_model(model, 5000)
+        # Load the model if it exists and set a flag
+        model_loaded = load_model(model, 40000)  # Change episode to 40000
 
-    if model_loaded:
-        print(f"model {model_loaded} loaded")
-        epsilon = 0.778
-        beta = 1.0
-    else:
-        epsilon = 1.0
+        # Set epsilon based on whether the model was loaded successfully
+        if model_loaded:
+            print(f"model {model_loaded} loaded")
+            epsilon = 0.1  # Specific epsilon for loaded model
+            beta = 1.0
+        else:
+            epsilon = 1.0
 
-    epsilon_decay_interval = 100
-    epsilon_decay = 0.995
-    epsilon_min = 0.1
+        epsilon_decay_interval = 10  # Number of episodes between epsilon decay
+        epsilon_decay = 0.999  # Decay rate
+        epsilon_min = 0.1  # Ensure some exploration even at the end
 
-    for episode in range(num_episodes):
-        state = env.reset()
-        state = state.flatten()
-        total_reward = 0
+        for episode in range(num_episodes):
+            state = env.reset()
+            state = state.flatten()
+            total_reward = 0
 
-        video_path = f"recordings/episode_{episode}.avi"
-        video = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'XVID'), 10,
-                                (env.width * env.block_size * 2, env.height * env.block_size))
-
-        logging.debug(f"Starting episode {episode + 1}")
-
-        episode_start_time = time.time()  # Start timing the episode
-
-        while True:
-            if time.time() - episode_start_time > 300:  # Timeout after 300 seconds
-                logging.warning(f"Episode {episode + 1} taking too long, terminating early.")
-                break
-
-            if random.random() < epsilon:
-                action = random.choice(possible_actions)
+            if (episode + 1) % 500 == 0:
+                video_path = f"recordings/episode_{episode}.avi"
+                video = cv2.VideoWriter(video_path, cv2.VideoWriter_fourcc(*'XVID'), 10,
+                                        (env.width * env.block_size * 2, env.height * env.block_size))
             else:
-                with torch.no_grad():
-                    state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
-                    q_values = model(state_tensor)
-                    action_index = torch.argmax(q_values).item()
-                    action = index_to_action[action_index]
+                video = None
 
-            next_states = env.get_next_states()
+            while True:
+                if random.random() < epsilon:
+                    # exploration: choose a random action
+                    action = random.choice(possible_actions)
+                else:
+                    with torch.no_grad():
+                        # exploitation: choose the greedy action
+                        state_tensor = torch.FloatTensor(state).unsqueeze(0).to(device)
+                        q_values = model(state_tensor)
+                        action_index = torch.argmax(q_values).item()
+                        action = index_to_action[action_index]
 
-            if action not in next_states:
-                continue
+                next_states = env.get_next_states()
 
-            try:
+                # Ensure the action is valid
+                if action not in next_states:
+                    continue
+
                 reward, done = env.step(action, render=True, video=video)
-            except Exception as e:
-                logging.error(f"Exception during env.step: {e}")
-                break
+                next_state = next_states[action].flatten()
 
-            next_state = next_states[action].flatten()
+                # Modify reward shaping
+                if done:
+                    reward -= 10  # Penalize game over
+                else:
+                    reward += 10 * env.cleared_lines
+                    reward -= env.get_holes(env.board)
 
-            if done:
-                reward -= 10
-            else:
-                reward += 10 * env.cleared_lines
-                reward -= env.get_holes(env.board)
+                action_index = action_to_index[action]
 
-            action_index = action_to_index[action]
+                replay_buffer.push(
+                    torch.FloatTensor(state).to(device),
+                    action_index,  # Store action index
+                    reward,
+                    torch.FloatTensor(next_state).to(device),
+                    done
+                )
 
-            replay_buffer.push(
-                torch.FloatTensor(state).to(device),
-                action_index,
-                reward,
-                torch.FloatTensor(next_state).to(device),
-                done
-            )
+                state = next_state
+                total_reward += reward
 
-            state = next_state
-            total_reward += reward
+                train(env, model, target_model, optimizer, replay_buffer, batch_size, gamma, beta)
 
-            train(env, model, target_model, optimizer, replay_buffer, batch_size, gamma, beta)
+                if done:
+                    break
 
-            if done:
-                break
+            if video:
+                video.release()
+            cv2.destroyAllWindows()
 
-        if video:
-            video.release()
-        cv2.destroyAllWindows()
+            # Update target network
+            if episode % 10 == 0:
+                target_model.load_state_dict(model.state_dict())
 
-        if episode % 10 == 0:
-            target_model.load_state_dict(model.state_dict())
+            # Decay epsilon at intervals
+            if (episode + 1) % epsilon_decay_interval == 0:
+                epsilon = max(epsilon * epsilon_decay, epsilon_min)
 
-        if (episode + 1) % epsilon_decay_interval == 0:
-            epsilon = max(epsilon * epsilon_decay, epsilon_min)
+            beta = min(1.0, beta + beta_increment_per_sampling)
+            print(f"Episode {episode + 1}, Total Reward: {total_reward}, Epsilon: {epsilon}, Beta: {beta}")
+            if (episode + 1) % 500 == 0:
+                save_model(model, episode)
 
-        beta = min(1.0, beta + beta_increment_per_sampling)
-        logging.debug(f"Episode {episode + 1}, Total Reward: {total_reward}, Epsilon: {epsilon}, Beta: {beta}")
+    except KeyboardInterrupt:
+        print("Training interrupted. Saving the model...")
+        save_model(model, episode)
+        print("Model saved. Exiting...")
 
-        if (episode + 1) % 500 == 0:
-            save_model(model, episode)
 
 if __name__ == "__main__":
     main()
