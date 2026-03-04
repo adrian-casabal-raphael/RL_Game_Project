@@ -153,12 +153,23 @@ def main():
         total_reward = 0
 
         video_path = f"recordings/episode_{episode}.avi"
+        frame_width = env.width * env.block_size + env.extra_board.shape[1]
+        frame_height = env.height * env.block_size
         video = cv2.VideoWriter(
             video_path,
             cv2.VideoWriter_fourcc(*"XVID"),
             10,
-            (env.width * env.block_size * 2, env.height * env.block_size),
+            (frame_width, frame_height),
         )
+        if not video.isOpened():
+            # Fallback codec/container for environments where XVID is unavailable.
+            video_path = f"recordings/episode_{episode}.mp4"
+            video = cv2.VideoWriter(
+                video_path,
+                cv2.VideoWriter_fourcc(*"mp4v"),
+                10,
+                (frame_width, frame_height),
+            )
 
         while True:
             next_states = env.get_next_states()
