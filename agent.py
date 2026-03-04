@@ -12,6 +12,11 @@ from src.tetris import Tetris
 os.makedirs("recordings", exist_ok=True)
 os.makedirs("models", exist_ok=True)
 
+DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+if DEVICE.type == "cuda":
+    torch.backends.cudnn.benchmark = True
+print(f"Using device: {DEVICE}")
+
 
 def build_action_space(env):
     actions = set()
@@ -68,46 +73,55 @@ class DQN(nn.Module):
 class ReplayBuffer:
     def __init__(self, capacity):
         self.buffer = deque(maxlen=capacity)
+        self.priorities = deque(maxlen=capacity)
 
-    def push(self, state, action, reward, next_state, done, next_valid_mask):
+    def push(self, state, action, reward, next_state, done, next_valid_mask, episode_score):
+        # Higher scored games get sampled more often in future updates.
+        priority = max(float(episode_score), 0.0) + 1.0
         self.buffer.append((state, action, reward, next_state, done, next_valid_mask))
+        self.priorities.append(priority)
 
     def sample(self, batch_size):
-        state, action, reward, next_state, done, next_valid_mask = zip(
-            *random.sample(self.buffer, batch_size)
+        indices = random.choices(
+            range(len(self.buffer)),
+            weights=list(self.priorities),
+            k=batch_size,
         )
+        batch = [self.buffer[i] for i in indices]
+        state, action, reward, next_state, done, next_valid_mask = zip(*batch)
         return state, action, reward, next_state, done, next_valid_mask
 
     def __len__(self):
         return len(self.buffer)
 
 
-def train(model, optimizer, replay_buffer, batch_size, gamma):
+def train(model, optimizer, replay_buffer, batch_size, gamma, device):
     if len(replay_buffer) < batch_size:
         return
 
     state, action, reward, next_state, done, next_valid_mask = replay_buffer.sample(batch_size)
 
-    state = torch.stack(state).float()
-    action = torch.tensor(action, dtype=torch.long).unsqueeze(1)
-    reward = torch.tensor(reward, dtype=torch.float32)
-    next_state = torch.stack(next_state).float()
-    done = torch.tensor(done, dtype=torch.float32)
-    next_valid_mask = torch.stack(next_valid_mask).bool()
+    state = torch.stack(state).float().to(device)
+    action = torch.tensor(action, dtype=torch.long, device=device).unsqueeze(1)
+    reward = torch.tensor(reward, dtype=torch.float32, device=device)
+    next_state = torch.stack(next_state).float().to(device)
+    done = torch.tensor(done, dtype=torch.float32, device=device)
+    next_valid_mask = torch.stack(next_valid_mask).bool().to(device)
 
     q_values = model(state)
     q_value = q_values.gather(1, action).squeeze(1)
 
-    next_q_values = model(next_state)
-    min_value = torch.finfo(next_q_values.dtype).min
-    masked_next_q_values = next_q_values.masked_fill(~next_valid_mask, min_value)
-    next_q_value = masked_next_q_values.max(1)[0]
-    has_valid_actions = next_valid_mask.any(dim=1)
-    next_q_value = torch.where(has_valid_actions, next_q_value, torch.zeros_like(next_q_value))
-    next_q_value = torch.where(done.bool(), torch.zeros_like(next_q_value), next_q_value)
+    with torch.no_grad():
+        next_q_values = model(next_state)
+        min_value = torch.finfo(next_q_values.dtype).min
+        masked_next_q_values = next_q_values.masked_fill(~next_valid_mask, min_value)
+        next_q_value = masked_next_q_values.max(1)[0]
+        has_valid_actions = next_valid_mask.any(dim=1)
+        next_q_value = torch.where(has_valid_actions, next_q_value, torch.zeros_like(next_q_value))
+        next_q_value = torch.where(done.bool(), torch.zeros_like(next_q_value), next_q_value)
+        expected_q_value = reward + gamma * next_q_value
 
-    expected_q_value = reward + gamma * next_q_value
-    loss = (q_value - expected_q_value.detach()).pow(2).mean()
+    loss = (q_value - expected_q_value).pow(2).mean()
 
     optimizer.zero_grad()
     loss.backward()
@@ -119,11 +133,10 @@ def save_model(model, episode):
     torch.save(model.state_dict(), model_path)
 
 
-def load_model(model, episode):
+def load_model(model, episode, device):
     model_path = f"models/tetris_model_{episode}.pth"
     if os.path.exists(model_path):
-        model.load_state_dict(torch.load(model_path, map_location=torch.device("cpu")))
-        model.eval()
+        model.load_state_dict(torch.load(model_path, map_location=device))
         print(f"Model loaded successfully from {model_path}")
         return True
     print(f"No model found at {model_path}")
@@ -136,14 +149,15 @@ def main():
     action_to_index = {action: idx for idx, action in enumerate(action_space)}
     index_to_action = {idx: action for idx, action in enumerate(action_space)}
 
-    model = DQN(input_dim=4, output_dim=len(action_space))
+    model = DQN(input_dim=4, output_dim=len(action_space)).to(DEVICE)
     optimizer = optim.Adam(model.parameters())
     replay_buffer = ReplayBuffer(10000)
     num_episodes = 3000
     batch_size = 32
     gamma = 0.99
 
-    model_loaded = load_model(model, 3000)
+    model_loaded = load_model(model, 3000, DEVICE)
+    model.train()
     epsilon = 0.1 if model_loaded else 1.0
     epsilon_decay = 0.999
     epsilon_min = 0.1
@@ -151,6 +165,7 @@ def main():
     for episode in range(num_episodes):
         state = env.reset().flatten().float()
         total_reward = 0
+        episode_memory = []
 
         video_path = f"recordings/episode_{episode}.avi"
         frame_width = env.width * env.block_size + env.extra_board.shape[1]
@@ -182,7 +197,7 @@ def main():
                 action = random.choice(valid_actions)
             else:
                 with torch.no_grad():
-                    q_values = model(state.unsqueeze(0))
+                    q_values = model(state.unsqueeze(0).to(DEVICE))
                     best_index = max(valid_indices, key=lambda idx: q_values[0, idx].item())
                     action = index_to_action[best_index]
 
@@ -202,28 +217,38 @@ def main():
                     len(action_space),
                 )
 
-            replay_buffer.push(
-                state,
-                action_to_index[action],
-                reward,
-                next_state,
-                done,
-                next_valid_mask,
+            episode_memory.append(
+                (
+                    state,
+                    action_to_index[action],
+                    reward,
+                    next_state,
+                    done,
+                    next_valid_mask,
+                )
             )
 
             state = next_state
             total_reward += reward
 
-            train(model, optimizer, replay_buffer, batch_size, gamma)
-
             if done:
                 break
+
+        episode_score = env.score
+        for transition in episode_memory:
+            replay_buffer.push(*transition, episode_score=episode_score)
+
+        for _ in range(len(episode_memory)):
+            train(model, optimizer, replay_buffer, batch_size, gamma, DEVICE)
 
         video.release()
         cv2.destroyAllWindows()
 
         epsilon = max(epsilon * epsilon_decay, epsilon_min)
-        print(f"Episode {episode + 1}, Total Reward: {total_reward}, Epsilon: {epsilon}")
+        print(
+            f"Episode {episode + 1}, Total Reward: {total_reward}, "
+            f"Game Score: {episode_score}, Epsilon: {epsilon}"
+        )
         save_model(model, episode)
 
 
