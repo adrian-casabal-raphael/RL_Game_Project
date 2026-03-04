@@ -44,6 +44,7 @@ class Tetris(gym.Env):
         self.grid = np.zeros((self.grid_height, self.grid_width), dtype=int)
         self.spawn_piece()
         self.score = 0
+        self.done = False
         return self.grid
 
     def step(self, action):
@@ -63,6 +64,7 @@ class Tetris(gym.Env):
             self.current_position = (self.current_position[0] + 1, self.current_position[1])
             done = False
         obs = self.get_observation()
+        self.done = done
         return obs, reward, done, {}
 
     def render(self, mode='human', video=None):
@@ -70,7 +72,7 @@ class Tetris(gym.Env):
             img = [self.piece_colors[p] for row in self.get_observation() for p in row]
         else:
             img = [self.piece_colors[p] for row in self.grid for p in row]
-        img = np.array(img).reshape((self.grid_height, self.grid_width, 3).astype(np.uint8))
+        img = np.array(img).reshape((self.grid_height, self.grid_width, 3)).astype(np.uint8)
         img = img[..., ::-1] # RGB to BGR
         img = Image.fromarray(img, "RGB")
         img = img.resize((self.grid_width * 30, self.grid_height * 30), Image.NEAREST)
@@ -128,7 +130,7 @@ class Tetris(gym.Env):
         elif action == 3: # down action
             while self.valid_position(self.current_piece, (self.current_position[0] + 1, self.current_position[1])):
                 self.current_position = (self.current_position[0] + 1, self.current_position[1])
-                return
+            return
         else:
             return
 
