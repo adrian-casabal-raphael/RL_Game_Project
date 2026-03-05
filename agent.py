@@ -1,5 +1,6 @@
 import os
 import random
+import re
 from collections import deque
 
 import cv2
@@ -133,13 +134,25 @@ def save_model(model, episode):
     torch.save(model.state_dict(), model_path)
 
 
+def get_latest_checkpoint_episode(models_dir="models"):
+    latest_episode = None
+    pattern = re.compile(r"^tetris_model_(\d+)\.pth$")
+    for filename in os.listdir(models_dir):
+        match = pattern.match(filename)
+        if not match:
+            continue
+        episode = int(match.group(1))
+        if latest_episode is None or episode > latest_episode:
+            latest_episode = episode
+    return latest_episode
+
+
 def load_model(model, episode, device):
     model_path = f"models/tetris_model_{episode}.pth"
     if os.path.exists(model_path):
         model.load_state_dict(torch.load(model_path, map_location=device))
         print(f"Model loaded successfully from {model_path}")
         return True
-    print(f"No model found at {model_path}")
     return False
 
 
@@ -152,22 +165,31 @@ def main():
     model = DQN(input_dim=4, output_dim=len(action_space)).to(DEVICE)
     optimizer = optim.Adam(model.parameters())
     replay_buffer = ReplayBuffer(10000)
-    num_episodes = 3000
+    num_episodes_per_run = 3000
     batch_size = 32
     gamma = 0.99
 
-    model_loaded = load_model(model, 3000, DEVICE)
+    latest_episode = get_latest_checkpoint_episode()
+    if latest_episode is not None and load_model(model, latest_episode, DEVICE):
+        start_episode = latest_episode
+        epsilon = 0.1
+        print(f"Resuming from most recent trial: episode {start_episode}")
+    else:
+        start_episode = 0
+        epsilon = 1.0
+        print("No checkpoint found. Starting from episode 1")
+
     model.train()
-    epsilon = 0.1 if model_loaded else 1.0
     epsilon_decay = 0.999
     epsilon_min = 0.1
 
-    for episode in range(num_episodes):
+    for episode_offset in range(num_episodes_per_run):
+        global_episode = start_episode + episode_offset
         state = env.reset().flatten().float()
         total_reward = 0
         episode_memory = []
 
-        video_path = f"recordings/episode_{episode}.avi"
+        video_path = f"recordings/episode_{global_episode}.avi"
         frame_width = env.width * env.block_size + env.extra_board.shape[1]
         frame_height = env.height * env.block_size
         video = cv2.VideoWriter(
@@ -178,7 +200,7 @@ def main():
         )
         if not video.isOpened():
             # Fallback codec/container for environments where XVID is unavailable.
-            video_path = f"recordings/episode_{episode}.mp4"
+            video_path = f"recordings/episode_{global_episode}.mp4"
             video = cv2.VideoWriter(
                 video_path,
                 cv2.VideoWriter_fourcc(*"mp4v"),
@@ -246,10 +268,10 @@ def main():
 
         epsilon = max(epsilon * epsilon_decay, epsilon_min)
         print(
-            f"Episode {episode + 1}, Total Reward: {total_reward}, "
+            f"Episode {global_episode + 1}, Total Reward: {total_reward}, "
             f"Game Score: {episode_score}, Epsilon: {epsilon}"
         )
-        save_model(model, episode)
+        save_model(model, global_episode)
 
 
 if __name__ == "__main__":
